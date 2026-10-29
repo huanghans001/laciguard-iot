@@ -1,4 +1,4 @@
-import json, math, os, random, subprocess, time
+import json, math, os, random, re, subprocess, time
 from statistics import median
 import paho.mqtt.client as mqtt
 from dotenv import load_dotenv
@@ -21,12 +21,41 @@ def make_client(name):
     return c
 
 
-def _find(names, key):
-    c = [n for n in names if key in n.lower() and "uncalibrated" not in n.lower()]
-    c.sort(key=lambda n: "non-wakeup" not in n.lower())
+def _non_wakeup_first(c):
+    c.sort(key=lambda n: "wakeup" in n.lower() and "non-wakeup" not in n.lower())
+    return c
+
+
+def find_accel(names):
+    env = os.getenv("ACCEL_SENSOR")
+    if env:
+        return env
+    bad = ("linear", "uncali", "gravity", "temp")
+    c = [n for n in names
+         if ("accelerometer" in n.lower() or re.search(r"(^|[^a-z])acc([^a-z]|$)", n.lower()))
+         and not any(b in n.lower() for b in bad)]
     if not c:
-        raise RuntimeError(f"Sensor '{key}' tidak ditemukan di HP ini")
-    return c[0]
+        raise RuntimeError("Sensor accelerometer tidak ditemukan. Isi ACCEL_SENSOR di .env")
+    return _non_wakeup_first(c)[0]
+
+
+def find_light(names):
+    env = os.getenv("LIGHT_SENSOR")
+    if env:
+        return env
+    bad = ("uncali", "factory", "flicker", "smd", "raw", "str", "back", "algo")
+    c = [n for n in names
+         if ("light" in n.lower() or re.search(r"(^|[^a-z])als([^a-z]|$)", n.lower()))
+         and not any(b in n.lower() for b in bad)]
+    if not c:
+        raise RuntimeError("Sensor cahaya tidak ditemukan. Isi LIGHT_SENSOR di .env")
+    return _non_wakeup_first(c)[0]
+
+
+def _values(d, name):
+    if name not in d or not d[name].get("values"):
+        raise RuntimeError(f"Sensor '{name}' tidak mengirim data. Coba ganti sensor di .env")
+    return d[name]["values"]
 
 
 class PhoneSensors:
@@ -40,9 +69,10 @@ class PhoneSensors:
                 ["termux-sensor", "-l"], capture_output=True, text=True,
                 timeout=12, check=True).stdout)["sensors"]
             if accel:
-                self.n_acc = _find(names, "accelerometer")
+                self.n_acc = find_accel(names)
             if light:
-                self.n_lux = _find(names, "light")
+                self.n_lux = find_light(names)
+            print(f"[SENSOR] accel={self.n_acc} light={self.n_lux}")
 
     def read(self):
         if self.sim:
@@ -58,12 +88,15 @@ class PhoneSensors:
         out = subprocess.run(["termux-sensor", "-s", ",".join(wanted), "-n", "1"],
                              capture_output=True, text=True, timeout=12,
                              check=True).stdout
-        d = json.loads(out)
+        try:
+            d = json.loads(out)
+        except ValueError:
+            raise RuntimeError("termux-sensor tidak mengirim data. Cek Termux:API dan izin")
         r = {"accel": None, "lux": None}
         if self.n_acc:
-            r["accel"] = tuple(float(v) for v in d[self.n_acc]["values"][:3])
+            r["accel"] = tuple(float(v) for v in _values(d, self.n_acc)[:3])
         if self.n_lux:
-            r["lux"] = float(d[self.n_lux]["values"][0])
+            r["lux"] = float(_values(d, self.n_lux)[0])
         return r
 
 
