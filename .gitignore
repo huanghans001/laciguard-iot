@@ -1,0 +1,5 @@
+.env
+__pycache__/
+*.pyc
+detector.log
+nohup.out
